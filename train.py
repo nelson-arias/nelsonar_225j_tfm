@@ -10,6 +10,7 @@ import numpy as np
 from sklearn.metrics import classification_report, f1_score, precision_score, recall_score
 import pandas as pd
 
+# Importar funciones de los pipelines y modelos
 from tf_pipeline import preprocess_image
 from model import build_model, build_hybrid_model
 
@@ -21,8 +22,10 @@ def load_dataset_from_csv(csv_path):
         for row in reader:
             if row['image_path'] and row['label']:
                 raw_path = row['image_path']
+                # Convertir backslashes de Windows a slashes de Linux
                 raw_path = raw_path.replace('\\', '/')
                 
+                # Si viene con la ruta absoluta de Windows, la recortamos
                 if 'words/' in raw_path:
                     rel_path = raw_path[raw_path.find('words/'):]
                     paths.append(rel_path)
@@ -102,34 +105,37 @@ def save_image_samples(dataset, save_path, title, model=None):
     plt.close()
     print(f"Imagen de muestras guardada en: {save_path}")
 
-def train_and_evaluate_model(csv_path, model_type, prefix, args, external_test_dataset=None):
+def train_and_evaluate_model(csv_path, model_type, prefix, args, external_test_dataset=None, external_val_dataset=None):
+    """
+    Entrena y evalúa un modelo específico ('resnet_baseline', 'crnn_bilstm', 'hybrid_transformer').
+    """
     print(f"\n{'='*60}")
     print(f"Iniciando entrenamiento: MODELO={model_type.upper()} | PREFIX={prefix.upper()}")
     print(f"{'='*60}")
     
     paths, labels = load_dataset_from_csv(csv_path)
     
-    train_paths, temp_paths, train_labels, temp_labels = train_test_split(
-        paths, labels, test_size=0.30, random_state=42, stratify=labels
-    )
-    
-    val_paths, test_paths, val_labels, test_labels = train_test_split(
-        temp_paths, temp_labels, test_size=0.50, random_state=42, stratify=temp_labels
-    )
-    
-    train_dataset = make_tf_dataset(train_paths, train_labels, batch_size=args.batch_size, is_training=True)
-    val_dataset = make_tf_dataset(val_paths, val_labels, batch_size=args.batch_size, is_training=False)
-    
-    if external_test_dataset is not None:
-        print("Utilizando test_dataset externo proporcionado para evaluación final.")
+    if external_val_dataset is not None and external_test_dataset is not None:
+        print("Utilizando conjuntos de Validación y Test limpios externos (fijos y excluidos del entrenamiento).")
+        train_paths, train_labels = paths, labels
+        train_dataset = make_tf_dataset(train_paths, train_labels, batch_size=args.batch_size, is_training=True)
+        val_dataset = external_val_dataset
         test_dataset = external_test_dataset
     else:
-        test_dataset = make_tf_dataset(test_paths, test_labels, batch_size=args.batch_size, is_training=False)
+        train_paths, temp_paths, train_labels, temp_labels = train_test_split(
+            paths, labels, test_size=0.30, random_state=42, stratify=labels
+        )
+        val_paths, test_paths, val_labels, test_labels = train_test_split(
+            temp_paths, temp_labels, test_size=0.50, random_state=42, stratify=temp_labels
+        )
+        train_dataset = make_tf_dataset(train_paths, train_labels, batch_size=args.batch_size, is_training=True)
+        val_dataset = make_tf_dataset(val_paths, val_labels, batch_size=args.batch_size, is_training=False)
+        test_dataset = external_test_dataset if external_test_dataset is not None else make_tf_dataset(test_paths, test_labels, batch_size=args.batch_size, is_training=False)
 
     save_image_samples(val_dataset, os.path.join(args.output_dir, f'{prefix}_raw_samples.png'), f"{prefix.capitalize()} - Muestras Crudas")
     save_image_samples(train_dataset, os.path.join(args.output_dir, f'{prefix}_augmented_samples.png'), f"{prefix.capitalize()} - Muestras Aumentadas")
 
-    print(f"Construyendo arquitectura {model_type}..")
+    print(f"Construyendo arquitectura {model_type}...")
     model = build_model(model_type=model_type, num_classes=10)
     total_params = model.count_params()
     
@@ -159,6 +165,7 @@ def train_and_evaluate_model(csv_path, model_type, prefix, args, external_test_d
     plot_path = os.path.join(args.output_dir, f'{prefix}_plot.png')
     plot_history(history, save_path=plot_path)
     
+    # === RECOPILACIÓN DE ESTADÍSTICAS DE GPU ===
     gpus = tf.config.list_physical_devices('GPU')
     gpu_name = "CPU (No GPU detectada)"
     memory_peak = "N/A"
@@ -194,8 +201,9 @@ def train_and_evaluate_model(csv_path, model_type, prefix, args, external_test_d
     plt.savefig(stats_path, dpi=150)
     plt.close()
     print(f"Estadísticas de GPU guardadas en: {stats_path}")
+    # ============================================
     
-    print("Guardando predicciones y calculando métricas finales sobre Test Set...")
+    print("Guardando predicciones y calculando métricas finales sobre el Test Set...")
     model.load_weights(model_path)
     save_image_samples(test_dataset, os.path.join(args.output_dir, f'{prefix}_test_predictions.png'), f"{prefix.capitalize()} - Predicciones Test", model=model)
     
@@ -223,10 +231,14 @@ def train_and_evaluate_model(csv_path, model_type, prefix, args, external_test_d
         'recall': recall,
         'training_time_sec': elapsed_time,
         'history': history,
+        'val_dataset': val_dataset,
         'test_dataset': test_dataset
     }
 
 def generate_architectural_comparison_report(results_list, output_dir):
+    """
+    Genera gráficos y tablas comparativas visuales para las 3 arquitecturas entrenadas.
+    """
     print("\n" + "="*60)
     print("REPORTE COMPARATIVO DE ARQUITECTURAS (TOP 10 AUTORES - IAM DATASET)")
     print("="*60)
@@ -246,6 +258,7 @@ def generate_architectural_comparison_report(results_list, output_dir):
     csv_path = os.path.join(output_dir, 'arch_comparison_metrics.csv')
     df.to_csv(csv_path, index=False)
     
+    # 1. Gráfico de barras comparativo de métricas
     model_names = [res['model_name'] for res in results_list]
     metrics = ['Val Accuracy', 'F1 Score', 'Precision', 'Recall']
     
@@ -274,6 +287,7 @@ def generate_architectural_comparison_report(results_list, output_dir):
     plt.savefig(plot_path, dpi=300)
     plt.close()
     
+    # 2. Curvas de aprendizaje superpuestas (si history está disponible)
     curves_path = None
     has_histories = any(res.get('history') is not None for res in results_list)
     if has_histories:
@@ -308,6 +322,7 @@ def generate_architectural_comparison_report(results_list, output_dir):
         plt.savefig(curves_path, dpi=300)
         plt.close()
 
+    # 3. Imagen renderizada de la Tabla Comparativa
     fig_tbl, ax_tbl = plt.subplots(figsize=(12, 3 + len(df) * 0.5))
     ax_tbl.axis('tight')
     ax_tbl.axis('off')
@@ -336,13 +351,16 @@ def generate_architectural_comparison_report(results_list, output_dir):
     plt.close()
     
     print(f"\nArchivos comparativos generados exitosamente en '{output_dir}':")
-    print(f"Métrica Barras: {plot_path}")
+    print(f" - Métrica Barras: {plot_path}")
     if curves_path:
         print(f" - Curvas Aprendizaje: {curves_path}")
-    print(f"Tabla Visual PNG: {tbl_path}")
-    print(f"Datos CSV: {csv_path}")
+    print(f" - Tabla Visual PNG: {tbl_path}")
+    print(f" - Datos CSV: {csv_path}")
 
 def generate_comparison_report(clean_metrics, noisy_metrics, output_dir):
+    """
+    Genera reporte comparativo Clean vs Noisy para la propuesta híbrida.
+    """
     print("\n" + "="*50)
     print("REPORTE COMPARATIVO CLEAN VS NOISY (PROPUESTA HÍBRIDA)")
     print("="*50)
@@ -390,26 +408,31 @@ def generate_comparison_report(clean_metrics, noisy_metrics, output_dir):
     print(f"\nReporte Clean vs Noisy guardado en: {comp_plot_path}")
 
 def evaluate_saved_model(csv_path, model_type, prefix, output_dir, batch_size=32, external_test_dataset=None):
+    """
+    Carga los pesos de un modelo ya entrenado (.keras) y evalúa las métricas en validación sin re-entrenar.
+    """
     model_path = os.path.join(output_dir, f'{prefix}_model.keras')
-    print(f"\nEvaluando modelo guardado: {model_path} ({model_type})..")
+    print(f"\nEvaluando modelo guardado: {model_path} ({model_type})...")
     
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"No se encontró el archivo del modelo guardado: {model_path}")
         
+    paths, labels = load_dataset_from_csv(csv_path)
+    train_paths, temp_paths, train_labels, temp_labels = train_test_split(
+        paths, labels, test_size=0.30, random_state=42, stratify=labels
+    )
+    val_paths, test_paths, val_labels, test_labels = train_test_split(
+        temp_paths, temp_labels, test_size=0.50, random_state=42, stratify=temp_labels
+    )
+    val_dataset = make_tf_dataset(val_paths, val_labels, batch_size=batch_size, is_training=False)
+    
     if external_test_dataset is not None:
-        print("Utilizando test_dataset externo proporcionado para evaluación final.")
+        print("Utilizando test_dataset externo proporcionado para la evaluación final.")
         test_dataset = external_test_dataset
     else:
-        paths, labels = load_dataset_from_csv(csv_path)
-        train_paths, temp_paths, train_labels, temp_labels = train_test_split(
-            paths, labels, test_size=0.30, random_state=42, stratify=labels
-        )
-        val_paths, test_paths, val_labels, test_labels = train_test_split(
-            temp_paths, temp_labels, test_size=0.50, random_state=42, stratify=temp_labels
-        )
         test_dataset = make_tf_dataset(test_paths, test_labels, batch_size=batch_size, is_training=False)
     
-    print(f"Construyendo arquitectura '{model_type}' y cargando pesos..")
+    print(f"Construyendo arquitectura '{model_type}' y cargando pesos...")
     model = build_model(model_type=model_type, num_classes=10)
     model.load_weights(model_path)
     total_params = model.count_params()
@@ -420,7 +443,7 @@ def evaluate_saved_model(csv_path, model_type, prefix, output_dir, batch_size=32
         metrics=[tf.keras.metrics.SparseCategoricalAccuracy()]
     )
     
-    print("Calculando evaluación en dataset de test..")
+    print("Calculando evaluación en dataset de test...")
     test_loss, test_acc = model.evaluate(test_dataset, verbose=0)
     
     all_preds = []
@@ -445,6 +468,7 @@ def evaluate_saved_model(csv_path, model_type, prefix, output_dir, batch_size=32
         'recall': recall,
         'training_time_sec': 0.0,
         'history': None,
+        'val_dataset': val_dataset,
         'test_dataset': test_dataset
     }
 
@@ -463,6 +487,7 @@ def main():
     print(f"GPUs disponibles: {tf.config.list_physical_devices('GPU')}")
     
     if args.mode == 'compare_architectures':
+        # Comparación de las 3 arquitecturas únicamente en el dataset limpio (iam_top10_dataset.csv)
         architectures = [
             ('resnet_baseline', 'resnet_baseline'),
             ('crnn_bilstm', 'crnn_bilstm'),
@@ -478,6 +503,7 @@ def main():
 
     elif args.mode == 'clean_vs_noisy':
         import shutil
+        # Comparación de impacto de ruido únicamente en la propuesta híbrida
         clean_path = os.path.join(args.output_dir, 'clean_hybrid_model.keras')
         prev_clean_path = os.path.join(args.output_dir, 'hybrid_transformer_model.keras')
         
@@ -486,15 +512,24 @@ def main():
             print(f"Reutilizando modelo limpio previa de la comparativa de arquitecturas: {prev_clean_path}")
 
         if os.path.exists(clean_path):
-            print("Cargando y evaluando el modelo limpio pre-existente..")
+            print("Cargando y evaluando el modelo limpio pre-existente...")
             clean_metrics = evaluate_saved_model(args.clean_csv, model_type='hybrid_transformer', prefix='clean_hybrid', output_dir=args.output_dir, batch_size=args.batch_size)
         else:
             clean_metrics = train_and_evaluate_model(args.clean_csv, model_type='hybrid_transformer', prefix='clean_hybrid', args=args)
             
+        val_dataset_limpio = clean_metrics['val_dataset']
         test_dataset_limpio = clean_metrics['test_dataset']
 
-        print("\nIniciando entrenamiento del modelo con Ruido (iam_noisy_dataset.csv)..")
-        noisy_metrics = train_and_evaluate_model(args.noisy_csv, model_type='hybrid_transformer', prefix='noisy_hybrid', args=args, external_test_dataset=test_dataset_limpio)
+        print("\nIniciando entrenamiento del modelo con Ruido (iam_noisy_dataset.csv)...")
+        print("Garantía metodológica: El conjunto ruidoso se generó exclusivamente a partir de la partición de entrenamiento; validación y test permanecen fijos, limpios y completamente excluidos del entrenamiento.")
+        noisy_metrics = train_and_evaluate_model(
+            args.noisy_csv, 
+            model_type='hybrid_transformer', 
+            prefix='noisy_hybrid', 
+            args=args, 
+            external_test_dataset=test_dataset_limpio,
+            external_val_dataset=val_dataset_limpio
+        )
         generate_comparison_report(clean_metrics, noisy_metrics, args.output_dir)
 
 if __name__ == '__main__':
